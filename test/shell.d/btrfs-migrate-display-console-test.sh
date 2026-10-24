@@ -1,0 +1,122 @@
+#!/bin/bash
+
+# omarchy-system-btrfs-migrate stages a boot that prompts for the disk
+# passphrase on /dev/console. On Apple Silicon that is the serial port unless
+# the kernel command line says console=tty0, so the staging step writes it into
+# GRUB's defaults and regenerates grub.cfg. These checks run the function
+# against fixture files: no root, no disk, no real grub-mkconfig.
+
+set -euo pipefail
+
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+printf 'apple,j375c\0apple,t6001\0apple,arm-platform\0' >"$work/apple"
+printf 'raspberrypi,5-model-b\0brcm,bcm2712\0' >"$work/pi"
+
+# Runs ensure_display_console in a subshell with the fixtures in place of the
+# device tree and /etc/default/grub, and grub-mkconfig replaced by a recorder.
+run_fixture() (
+  local compatible=$1 grub=$2
+  source "$ROOT/bin/omarchy-system-btrfs-migrate"
+  grub-mkconfig() { printf '%s\n' "$*" >>"$work/mkconfig"; }
+  log() { :; }
+  warn() { printf '%s\n' "$*" >>"$work/warnings"; }
+  OMARCHY_APPLE_COMPATIBLE=$compatible OMARCHY_GRUB_DEFAULT=$grub ensure_display_console
+)
+
+mkconfig_calls() {
+  if [[ -f $work/mkconfig ]]; then wc -l <"$work/mkconfig"; else echo 0; fi
+}
+
+# The Asahi Alarm default: quiet, no console named.
+cat >"$work/asahi" <<'GRUB'
+GRUB_DEFAULT=0
+GRUB_TIMEOUT=5
+GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet"
+GRUB_CMDLINE_LINUX=""
+GRUB
+
+run_fixture "$work/apple" "$work/asahi"
+grep -qx 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet console=tty0"' "$work/asahi" ||
+  fail 'console=tty0 is appended to the default command line' "$(cat "$work/asahi")"
+grep -qx 'GRUB_CMDLINE_LINUX=""' "$work/asahi" || fail 'GRUB_CMDLINE_LINUX is left alone'
+[[ $(mkconfig_calls) == 1 ]] || fail 'grub.cfg is regenerated once'
+grep -qx -- '-o /boot/grub/grub.cfg' "$work/mkconfig" || fail 'grub.cfg is written where GRUB reads it'
+pass 'an Apple Silicon machine with no console gets console=tty0 and a new grub.cfg'
+
+cp "$work/asahi" "$work/expected"
+run_fixture "$work/apple" "$work/asahi"
+cmp -s "$work/asahi" "$work/expected" || fail 'a second run changes nothing' "$(diff "$work/expected" "$work/asahi")"
+[[ $(mkconfig_calls) == 1 ]] || fail 'a second run does not regenerate grub.cfg'
+pass 'the change is idempotent'
+
+printf "GRUB_CMDLINE_LINUX_DEFAULT='loglevel=3 quiet'\n" >"$work/single"
+run_fixture "$work/apple" "$work/single"
+grep -qx "GRUB_CMDLINE_LINUX_DEFAULT='loglevel=3 quiet console=tty0'" "$work/single" ||
+  fail 'single-quoted values are appended inside their quotes' "$(cat "$work/single")"
+pass 'single quotes are respected'
+
+printf 'GRUB_CMDLINE_LINUX_DEFAULT=""\n' >"$work/empty"
+run_fixture "$work/apple" "$work/empty"
+grep -qx 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0"' "$work/empty" ||
+  fail 'an empty value gets console=tty0 without a leading space' "$(cat "$work/empty")"
+pass 'an empty command line is handled'
+
+printf 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet"  # keep it quiet\n' >"$work/comment"
+run_fixture "$work/apple" "$work/comment"
+grep -qx 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet console=tty0"  # keep it quiet' "$work/comment" ||
+  fail 'a trailing comment is kept' "$(cat "$work/comment")"
+pass 'a trailing comment survives'
+
+rm -f "$work/mkconfig"
+printf 'GRUB_CMDLINE_LINUX_DEFAULT=$UNQUOTED\n' >"$work/odd"
+run_fixture "$work/apple" "$work/odd" || fail 'a value the edit cannot parse does not abort the staging'
+grep -q 'add it yourself' "$work/warnings" || fail 'a value the edit cannot parse is warned about'
+[[ $(mkconfig_calls) == 0 ]] || fail 'nothing is regenerated when nothing was added'
+pass 'an unparseable value warns instead of regenerating a config without the fix'
+
+printf 'GRUB_TIMEOUT=5\n' >"$work/absent"
+run_fixture "$work/apple" "$work/absent"
+grep -qx 'GRUB_CMDLINE_LINUX_DEFAULT="console=tty0"' "$work/absent" ||
+  fail 'a file without the variable gains it' "$(cat "$work/absent")"
+pass 'a missing GRUB_CMDLINE_LINUX_DEFAULT is added'
+
+rm -f "$work/mkconfig"
+printf 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet console=ttySAC0,115200"\n' >"$work/serial"
+cp "$work/serial" "$work/serial.expected"
+run_fixture "$work/apple" "$work/serial"
+cmp -s "$work/serial" "$work/serial.expected" || fail 'a console the owner chose is kept' "$(cat "$work/serial")"
+[[ $(mkconfig_calls) == 0 ]] || fail 'no grub.cfg churn when nothing changed'
+pass 'an explicit serial console is left alone'
+
+printf 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet"\nGRUB_CMDLINE_LINUX="console=tty0"\n' >"$work/linux-var"
+cp "$work/linux-var" "$work/linux-var.expected"
+run_fixture "$work/apple" "$work/linux-var"
+cmp -s "$work/linux-var" "$work/linux-var.expected" || fail 'a console set in GRUB_CMDLINE_LINUX counts' "$(cat "$work/linux-var")"
+pass 'a console on either GRUB variable satisfies the check'
+
+printf 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet"\n' >"$work/pi-grub"
+cp "$work/pi-grub" "$work/pi-grub.expected"
+run_fixture "$work/pi" "$work/pi-grub"
+cmp -s "$work/pi-grub" "$work/pi-grub.expected" || fail 'a non-Apple machine is untouched' "$(cat "$work/pi-grub")"
+[[ $(mkconfig_calls) == 0 ]] || fail 'a non-Apple machine does not regenerate grub.cfg'
+pass 'only Apple Silicon is affected'
+
+run_fixture "$work/apple" "$work/does-not-exist" || fail 'a missing /etc/default/grub does not abort the staging'
+[[ -f $work/warnings ]] && grep -q 'console=tty0' "$work/warnings" || fail 'a missing /etc/default/grub is warned about'
+[[ $(mkconfig_calls) == 0 ]] || fail 'nothing is regenerated without a defaults file'
+pass 'a missing GRUB defaults file warns instead of failing'
+
+# The staging path must reach the function before the worker is staged, on
+# both filesystem types, so the boot it stages can be answered.
+for stage in stage_convert stage_encrypt; do
+  body=$(sed -n "/^$stage() {/,/^}/p" "$ROOT/bin/omarchy-system-btrfs-migrate")
+  grep -q 'ensure_display_console' <<<"$body" || fail "$stage calls ensure_display_console"
+  console_line=$(grep -n 'ensure_display_console' <<<"$body" | cut -d: -f1)
+  worker_line=$(grep -n 'stage_worker' <<<"$body" | cut -d: -f1)
+  (( console_line < worker_line )) || fail "$stage fixes the console before staging the worker"
+done
+pass 'both staging paths fix the console before the worker is staged'
