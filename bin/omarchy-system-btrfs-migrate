@@ -795,13 +795,16 @@ require_separate_boot() {
 
 # Prints the value assigned to $2 in the GRUB defaults file $1: quotes removed,
 # any trailing comment dropped, the last assignment winning as it does when the
-# shell reads the file. Nothing is printed when the variable is not set.
+# shell reads the file. A double-quoted value ends at its first unescaped quote,
+# and the backslashes that escape characters inside it are dropped, as the
+# shell drops them. Nothing is printed when the variable is not set.
 grub_default_value() {
   local file=$1 var=$2 line
-  line=$(grep -E "^[[:space:]]*$var=" "$file" | tail -n 1) || return 0
+  line=$(grep -E "^[[:space:]]*$var=" "$file" | tail -n 1)
+  [[ -n $line ]] || return 0
   line=${line#*=}
   case $line in
-    \"*) line=${line#\"}; printf '%s' "${line%%\"*}" ;;
+    \"*) sed -E 's/^"(([^"\\]|\\.)*).*/\1/; s/\\(.)/\1/g' <<<"$line" | tr -d '\n' ;;
     \'*) line=${line#\'}; printf '%s' "${line%%\'*}" ;;
     *) line=${line%%#*}; printf '%s' "${line%%[[:space:]]*}" ;;
   esac
@@ -845,10 +848,11 @@ ensure_display_console() {
   cp -p "$grub_default" "$backup"
   if grep -Eq '^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=' "$grub_default"; then
     # Append inside the quotes, whichever kind they are. The value ends at the
-    # first matching quote, so a quote inside a trailing comment is never
-    # mistaken for it; an empty value gets no leading space.
+    # first matching quote that is not escaped, so neither a quote inside a
+    # trailing comment nor a \" inside the value is mistaken for it; an empty
+    # value gets no leading space.
     sed -i -E \
-      -e 's/^([[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=")([^"]*)"/\1\2 console=tty0"/' \
+      -e 's/^([[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=")(([^"\\]|\\.)*)"/\1\2 console=tty0"/' \
       -e "s/^([[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=')([^']*)'/\1\2 console=tty0'/" \
       -e 's/^([[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=["'"'"']) console=tty0/\1console=tty0/' \
       "$grub_default"

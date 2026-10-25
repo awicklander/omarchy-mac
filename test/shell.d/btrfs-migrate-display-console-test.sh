@@ -118,6 +118,26 @@ grep -qx 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet console=tty0" # say "hell
   fail 'console=tty0 goes inside the value, not inside a quoted comment' "$(cat "$work/quoted-comment")"
 pass 'a trailing comment with quotes of its own does not capture the edit'
 
+# A \" inside the value is part of it, not its end. The edited file must still
+# read as grub-mkconfig reads it, by sourcing it.
+rm -f "$work/mkconfig"
+printf 'GRUB_CMDLINE_LINUX_DEFAULT="quiet dyndbg=\\"file drivers/usb/* +p\\""\n' >"$work/escaped"
+run_fixture "$work/apple" "$work/escaped"
+grep -qxF 'GRUB_CMDLINE_LINUX_DEFAULT="quiet dyndbg=\"file drivers/usb/* +p\" console=tty0"' "$work/escaped" ||
+  fail 'console=tty0 goes after an escaped quote, not before it' "$(cat "$work/escaped")"
+[[ $(. "$work/escaped"; printf '%s' "$GRUB_CMDLINE_LINUX_DEFAULT") == 'quiet dyndbg="file drivers/usb/* +p" console=tty0' ]] ||
+  fail 'the edited file still reads as the shell reads it' "$(cat "$work/escaped")"
+[[ $(mkconfig_calls) == 1 ]] || fail 'grub.cfg is regenerated for a value with escaped quotes'
+pass 'a value with escaped quotes keeps its quoting'
+
+rm -f "$work/mkconfig"
+printf 'GRUB_CMDLINE_LINUX_DEFAULT="dyndbg=\\"file drivers/usb/* +p\\" console=ttySAC0,115200"\n' >"$work/escaped-serial"
+cp "$work/escaped-serial" "$work/escaped-serial.expected"
+run_fixture "$work/apple" "$work/escaped-serial"
+cmp -s "$work/escaped-serial" "$work/escaped-serial.expected" || fail 'a console after an escaped quote is seen' "$(cat "$work/escaped-serial")"
+[[ $(mkconfig_calls) == 0 ]] || fail 'no grub.cfg churn when the console was there all along'
+pass 'a console set after an escaped quote counts'
+
 # A comment is not a console.
 rm -f "$work/mkconfig"
 printf 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet" # console=ttySAC0 was tried once\n' >"$work/commented-console"
