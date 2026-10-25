@@ -24,6 +24,7 @@ run_fixture() (
   grub-mkconfig() { printf '%s\n' "$*" >>"$work/mkconfig"; }
   log() { :; }
   warn() { printf '%s\n' "$*" >>"$work/warnings"; }
+  fail() { printf '%s\n' "$*" >>"$work/errors"; exit 1; }
   OMARCHY_APPLE_COMPATIBLE=$compatible OMARCHY_GRUB_DEFAULT=$grub ensure_display_console
 )
 
@@ -109,6 +110,55 @@ run_fixture "$work/apple" "$work/does-not-exist" || fail 'a missing /etc/default
 [[ -f $work/warnings ]] && grep -q 'console=tty0' "$work/warnings" || fail 'a missing /etc/default/grub is warned about'
 [[ $(mkconfig_calls) == 0 ]] || fail 'nothing is regenerated without a defaults file'
 pass 'a missing GRUB defaults file warns instead of failing'
+
+# The value ends at its closing quote, not at the last quote on the line.
+printf 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet" # say "hello"\n' >"$work/quoted-comment"
+run_fixture "$work/apple" "$work/quoted-comment"
+grep -qx 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet console=tty0" # say "hello"' "$work/quoted-comment" ||
+  fail 'console=tty0 goes inside the value, not inside a quoted comment' "$(cat "$work/quoted-comment")"
+pass 'a trailing comment with quotes of its own does not capture the edit'
+
+# A comment is not a console.
+rm -f "$work/mkconfig"
+printf 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet" # console=ttySAC0 was tried once\n' >"$work/commented-console"
+run_fixture "$work/apple" "$work/commented-console"
+grep -qx 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet console=tty0" # console=ttySAC0 was tried once' "$work/commented-console" ||
+  fail 'a console= inside a comment does not count as a console' "$(cat "$work/commented-console")"
+[[ $(mkconfig_calls) == 1 ]] || fail 'grub.cfg is regenerated when the only console= was in a comment'
+pass 'a console named only in a comment is still fixed'
+
+printf 'GRUB_CMDLINE_LINUX_DEFAULT=loglevel=3\n' >"$work/bare"
+cp "$work/bare" "$work/bare.expected"
+run_fixture "$work/apple" "$work/bare" || fail 'an unquoted value does not abort the staging'
+cmp -s "$work/bare" "$work/bare.expected" || fail 'an unquoted value is left as it was' "$(cat "$work/bare")"
+grep -q 'add it yourself' "$work/warnings" || fail 'an unquoted value is warned about'
+pass 'an unquoted value is warned about and left intact'
+
+# A failed grub-mkconfig leaves the defaults as they were, so the next run
+# starts over instead of finding console=tty0 already present and skipping
+# the regeneration that never happened.
+rm -f "$work/mkconfig" "$work/errors"
+printf 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet"\n' >"$work/retry"
+cp "$work/retry" "$work/retry.expected"
+if (
+  source "$ROOT/bin/omarchy-system-btrfs-migrate"
+  grub-mkconfig() { printf '%s\n' "$*" >>"$work/mkconfig"; return 1; }
+  log() { :; }
+  warn() { :; }
+  fail() { printf '%s\n' "$*" >>"$work/errors"; exit 1; }
+  OMARCHY_APPLE_COMPATIBLE=$work/apple OMARCHY_GRUB_DEFAULT=$work/retry ensure_display_console
+); then
+  fail 'a failed grub-mkconfig stops the staging'
+fi
+cmp -s "$work/retry" "$work/retry.expected" || fail 'a failed grub-mkconfig restores the defaults file' "$(cat "$work/retry")"
+grep -q 'grub-mkconfig failed' "$work/errors" || fail 'a failed grub-mkconfig is reported' "$(cat "$work/errors" 2>/dev/null)"
+pass 'a failed grub-mkconfig restores the defaults and stops the staging'
+
+run_fixture "$work/apple" "$work/retry"
+grep -qx 'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet console=tty0"' "$work/retry" ||
+  fail 'the retry adds console=tty0 again' "$(cat "$work/retry")"
+[[ $(mkconfig_calls) == 2 ]] || fail 'the retry regenerates grub.cfg' "$(mkconfig_calls) calls"
+pass 'the retry after a failed grub-mkconfig finishes the job'
 
 # The staging path must reach the function before the worker is staged, on
 # both filesystem types, so the boot it stages can be answered.
