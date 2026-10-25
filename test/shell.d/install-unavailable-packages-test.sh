@@ -43,7 +43,10 @@ pass 'OMARCHY_TRY_UNAVAILABLE=1 tries the packages without asking'
 # Unset, with a readable /dev/tty, the question is still asked; without one it
 # is not. Both cases run in a subshell that redirects /dev/tty's readability
 # through the test: [[ -r /dev/tty ]] is true on a terminal and in most CI
-# sandboxes, so only the prompting path is asserted when it is.
+# sandboxes, so only the prompting path is asserted when it is. An answer
+# exported by whoever runs the tests would be inherited here and turn this into
+# a check of their shell, so it is dropped first.
+unset OMARCHY_TRY_UNAVAILABLE
 if [[ -r /dev/tty ]]; then
   if should_attempt_unavailable; then
     fail 'the scripted "no" is honoured'
